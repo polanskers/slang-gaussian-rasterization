@@ -270,6 +270,9 @@ float4 evaluate_splat(Splat_2D_AlphaBlend g,
                  pix_coord.y - ndc2pix(g_xyz.y, H) };
     float power = -0.5f * (g_inv_cov_vs[0][0] * d.x * d.x +
                            g_inv_cov_vs[1][1] * d.y * d.y + (g_inv_cov_vs[0][1] + g_inv_cov_vs[1][0]) * d.x * d.y);
+    if (power > 0.f) {
+        return float4(0);
+    }
     float alpha = min(0.99f, g_opacity * exp(power));
     float3 premult_rgb = g_rgb * alpha;
     
@@ -278,6 +281,8 @@ float4 evaluate_splat(Splat_2D_AlphaBlend g,
 
 [Differentiable]
 float3x3 get_covariance_from_quat_scales(float4 q, float3 s) {
+    float inv_norm = rsqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    q *= inv_norm;
     float r = q[0], x = q[1], y = q[2], z = q[3];
 
     float3x3 rotation_matrix = float3x3(

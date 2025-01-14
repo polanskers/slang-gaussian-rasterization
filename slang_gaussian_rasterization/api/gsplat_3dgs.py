@@ -12,23 +12,36 @@ def fov2focal(fov, pixels):
 def focal2fov(focal, pixels):
     return 2*math.atan(pixels/(2*focal))
 
-def get_slang_projection_matrix(znear, zfar, fy, fx, height, width, device):
-    tanHalfFovX = width/(2*fx)
-    tanHalfFovY = height/(2*fy)
+def get_slang_projection_matrix(znear, zfar, fy, fx, cy, cx, height, width, device):
+    tanHalfFovX = width / (2 * fx)
+    tanHalfFovY = height / (2 * fy)
 
     top = tanHalfFovY * znear
     bottom = -top
     right = tanHalfFovX * znear
     left = -right
 
-    z_sign = 1.0
+    # shift the frame window due to the non-zero principle point offsets
+    offset_x = cx - (width / 2)
+    offset_x = (offset_x / fx) * znear
+    offset_y = cy - (height / 2)
+    offset_y = (offset_y / fy) * znear
 
-    P = torch.tensor([
-       [2.0 * znear / (right - left),     0.0,                          (right + left) / (right - left), 0.0 ],
-       [0.0,                              2.0 * znear / (top - bottom), (top + bottom) / (top - bottom), 0.0 ],
-       [0.0,                              0.0,                          z_sign * zfar / (zfar - znear),  -(zfar * znear) / (zfar - znear) ],
-       [0.0,                              0.0,                          z_sign,                          0.0 ]
-    ], device=device)
+    top = top + offset_y
+    left = left + offset_x
+    right = right + offset_x
+    bottom = bottom + offset_y
+
+    z_sign = 1.0
+    P = torch.tensor(
+        [
+            [2.0 * znear / (right - left), 0.0, (right + left) / (right - left), 0.0],
+            [0.0, 2.0 * znear / (top - bottom), (top + bottom) / (top - bottom), 0.0],
+            [0.0, 0.0, z_sign * zfar / (zfar - znear), -(zfar * znear) / (zfar - znear)],
+            [0.0, 0.0, z_sign, 0.0],
+        ],
+        device=device,
+    )
 
     return P
 
@@ -40,7 +53,9 @@ def common_camera_properties_from_gsplat(viewmats, Ks, height, width):
   world_view_transform = viewmats
   fx = Ks[0,0]
   fy = Ks[1,1]
-  projection_matrix = get_slang_projection_matrix(znear, zfar, fy, fx, height, width, Ks.device)
+  cx = Ks[0, 2]
+  cy = Ks[1, 2]
+  projection_matrix = get_slang_projection_matrix(znear, zfar, fy, fx, cy, cx, height, width, Ks.device)
   fovx = focal2fov(fx, width)
   fovy = focal2fov(fy, height)
 

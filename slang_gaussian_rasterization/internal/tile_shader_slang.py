@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+from slang_gaussian_rasterization.internal.render_grid import RenderGrid, safe_div_ceil
 import slang_gaussian_rasterization.internal.slang.slang_modules as slang_modules
 import math
 from slang_gaussian_rasterization.internal.sort_by_keys import sort_by_keys_cub
@@ -27,7 +28,7 @@ def vertex_and_tile_shader(xyz_ws,
                            cam_pos,
                            fovy,
                            fovx,
-                           render_grid):
+                           render_grid: RenderGrid):
     """
     Vertex and Tile Shader for 3D Gaussian Splatting.
 
@@ -83,7 +84,7 @@ def vertex_and_tile_shader(xyz_ws,
                                               grid_height=render_grid.grid_height,
                                               grid_width=render_grid.grid_width).launchRaw(
             blockSize=(256, 1, 1),
-            gridSize=(math.ceil(n_points/256), 1, 1)
+            gridSize=(safe_div_ceil(n_points, 256), 1, 1)
       )    
 
       highest_tile_id_msb = (render_grid.grid_width*render_grid.grid_height).bit_length()
@@ -95,7 +96,7 @@ def vertex_and_tile_shader(xyz_ws,
       slang_modules.tile_shader.compute_tile_ranges(sorted_keys=sorted_keys,
                                                     out_tile_ranges=tile_ranges).launchRaw(
               blockSize=(256, 1, 1),
-              gridSize=(math.ceil(total_size_index_buffer/256), 1, 1)
+              gridSize=(safe_div_ceil(total_size_index_buffer, 256), 1, 1)
       )
 
     return sorted_gauss_idx, tile_ranges, radii, xyz_vs, inv_cov_vs, rgb
@@ -153,7 +154,7 @@ class VertexShader(torch.autograd.Function):
                                                 tile_height=render_grid.tile_height,
                                                 tile_width=render_grid.tile_width).launchRaw(
               blockSize=(256, 1, 1),
-              gridSize=(math.ceil(n_points/256), 1, 1)
+              gridSize=(safe_div_ceil(n_points, 256), 1, 1)
       )
 
       ctx.save_for_backward(xyz_ws, rotations, scales, sh_coeffs, world_view_transform, proj_mat, cam_pos,
@@ -204,6 +205,6 @@ class VertexShader(torch.autograd.Function):
                                                       tile_height=render_grid.tile_height,
                                                       tile_width=render_grid.tile_width).launchRaw(
               blockSize=(256, 1, 1),
-              gridSize=(math.ceil(n_points/256), 1, 1)
+              gridSize=(safe_div_ceil(n_points, 256), 1, 1)
         )
         return grad_xyz_ws, grad_rotations, grad_scales, grad_sh_coeffs, None, None, None, None, None, None, None
