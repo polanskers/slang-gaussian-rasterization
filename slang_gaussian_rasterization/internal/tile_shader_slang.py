@@ -28,7 +28,8 @@ def vertex_and_tile_shader(xyz_ws,
                            cam_pos,
                            fovy,
                            fovx,
-                           render_grid: RenderGrid):
+                           render_grid: RenderGrid,
+                           z_threshold: float):
     """
     Vertex and Tile Shader for 3D Gaussian Splatting.
 
@@ -65,7 +66,8 @@ def vertex_and_tile_shader(xyz_ws,
                                                                                         cam_pos,
                                                                                         fovy,
                                                                                         fovx,
-                                                                                        render_grid)
+                                                                                        render_grid,
+                                                                                        z_threshold)
 
     with torch.no_grad():
       index_buffer_offset = torch.cumsum(tiles_touched, dim=0, dtype=tiles_touched.dtype)
@@ -109,7 +111,9 @@ class VertexShader(torch.autograd.Function):
                 sh_coeffs, active_sh,
                 world_view_transform, proj_mat, cam_pos,
                 fovy, fovx,
-                render_grid, device="cuda"):
+                render_grid,
+                z_threshold,
+                device="cuda"):
       n_points = xyz_ws.shape[0]
       tiles_touched = torch.zeros((n_points), 
                                   device="cuda", 
@@ -152,7 +156,8 @@ class VertexShader(torch.autograd.Function):
                                                 grid_height=render_grid.grid_height,
                                                 grid_width=render_grid.grid_width,
                                                 tile_height=render_grid.tile_height,
-                                                tile_width=render_grid.tile_width).launchRaw(
+                                                tile_width=render_grid.tile_width,
+                                                z_threshold=z_threshold).launchRaw(
               blockSize=(256, 1, 1),
               gridSize=(safe_div_ceil(n_points, 256), 1, 1)
       )
@@ -163,6 +168,7 @@ class VertexShader(torch.autograd.Function):
       ctx.fovy = fovy
       ctx.fovx = fovx
       ctx.active_sh = active_sh
+      ctx.z_threshold = z_threshold
 
       return tiles_touched, rect_tile_space, radii, xyz_vs, inv_cov_vs, rgb
     
@@ -174,6 +180,7 @@ class VertexShader(torch.autograd.Function):
         fovy = ctx.fovy
         fovx = ctx.fovx
         active_sh = ctx.active_sh
+        z_threshold = ctx.z_threshold
 
         n_points = xyz_ws.shape[0]
 
@@ -203,8 +210,9 @@ class VertexShader(torch.autograd.Function):
                                                       grid_height=render_grid.grid_height,
                                                       grid_width=render_grid.grid_width,
                                                       tile_height=render_grid.tile_height,
-                                                      tile_width=render_grid.tile_width).launchRaw(
+                                                      tile_width=render_grid.tile_width,
+                                                      z_threshold=z_threshold).launchRaw(
               blockSize=(256, 1, 1),
               gridSize=(safe_div_ceil(n_points, 256), 1, 1)
         )
-        return grad_xyz_ws, grad_rotations, grad_scales, grad_sh_coeffs, None, None, None, None, None, None, None
+        return grad_xyz_ws, grad_rotations, grad_scales, grad_sh_coeffs, None, None, None, None, None, None, None, None

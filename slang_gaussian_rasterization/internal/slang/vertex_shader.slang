@@ -55,7 +55,8 @@ void vertex_shader(DiffTensorView xyz_ws,
                    uint grid_height,
                    uint grid_width,
                    uint tile_height,
-                   uint tile_width)
+                   uint tile_width,
+                   no_diff float z_threshold)
 {
     uint32_t g_idx = cudaBlockIdx().x * cudaBlockDim().x + cudaThreadIdx().x;
 
@@ -64,16 +65,23 @@ void vertex_shader(DiffTensorView xyz_ws,
 
     Camera cam = no_diff load_camera(world_view_transform, proj_mat, cam_pos, fovy, fovx, image_height, image_width);
     Gaussian_3D gauss = load_gaussian(g_idx, xyz_ws, sh_coeffs, rotations, scales, active_sh);
-    Splat_2D_Vertex splat = project_gaussian_to_camera(gauss, cam, active_sh);
-    if (splat.xyz_vs.z <= 0.2) {
+    Splat_2D_Vertex splat = project_gaussian_to_camera(gauss, cam, active_sh, z_threshold);
+    if (splat.xyz_vs.z <= z_threshold) {
         return;
     }
 
     float det = compute_det(splat.cov_vs);
 
-    if (det == 0.0f)
+    if (det < 0.0001f){
         return;
+    }
     float radius = splat_radius(splat.cov_vs, det);
+
+    // Cap max radius
+    const float kMaxRadiusPx = 5.0 * max(image_width, image_height);
+    if (radius > kMaxRadiusPx || !isfinite(radius)) {
+        radius = kMaxRadiusPx;
+    }
 
 
     float2 pixelspace_xy = { ndc2pix(splat.xyz_vs.x, image_width), ndc2pix(splat.xyz_vs.y, image_height) };

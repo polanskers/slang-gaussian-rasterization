@@ -23,22 +23,25 @@ groupshared Splat_2D_AlphaBlend collected_splats[TILE_HEIGHT * TILE_WIDTH];
 groupshared uint32_t collected_idx[TILE_HEIGHT * TILE_WIDTH];
 
 [Differentiable]
-float4 update_pixel_state(float4 pixel_state_t_nm1, float4 gauss_rgba_t_n)
+PixelState update_pixel_state(PixelState pixel_state_t_nm1, PixelState gauss_rgba_t_n)
 {
-    float3 color_t_n = pixel_state_t_nm1.rgb + gauss_rgba_t_n.rgb * pixel_state_t_nm1.a;
-    float transmittance_t_n = pixel_state_t_nm1.a * (1 - gauss_rgba_t_n.a);
-    return float4(color_t_n, transmittance_t_n);
+    float3 color_t_n = pixel_state_t_nm1.color.rgb + gauss_rgba_t_n.color.rgb * pixel_state_t_nm1.color.a;
+    float transmittance_t_n = pixel_state_t_nm1.color.a * (1 - gauss_rgba_t_n.color.a);
+    float depth_t_n = pixel_state_t_nm1.depth + gauss_rgba_t_n.depth * pixel_state_t_nm1.color.a;
+    return PixelState(float4(color_t_n, transmittance_t_n), depth_t_n);
 }
 
-float4 undo_pixel_state(float4 pixel_state_t_n, float4 gauss_rgba_t_n)
+PixelState undo_pixel_state(PixelState pixel_state_t_n, PixelState gauss_rgba_t_n)
 {
-    float transmittance_t_nm1 = pixel_state_t_n.a / (1 - gauss_rgba_t_n.a);
-    float3 color_t_nm1 = pixel_state_t_n.rgb - gauss_rgba_t_n.rgb * transmittance_t_nm1;
-    return float4(color_t_nm1, transmittance_t_nm1);
+    float transmittance_t_nm1 = pixel_state_t_n.color.a / (1 - gauss_rgba_t_n.color.a);
+    float3 color_t_nm1 = pixel_state_t_n.color.rgb - gauss_rgba_t_n.color.rgb * transmittance_t_nm1;
+    float depth_t_nm1 = pixel_state_t_n.depth - gauss_rgba_t_n.depth * transmittance_t_nm1;
+    return PixelState(float4(color_t_nm1, transmittance_t_nm1), depth_t_nm1);
 }
+
 
 [BackwardDerivative(bwd_alpha_blend)] // Use a custom derivative so that we can hand-write the structure of the reverse loop
-float4 alpha_blend(TensorView<int32_t> sorted_gauss_idx,
+PixelState alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                    DiffTensorView xyz_vs,
                    DiffTensorView inv_cov_vs,
                    DiffTensorView opacity,
@@ -54,7 +57,7 @@ float4 alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                    uint32_t W)
 {
     float2 center_pix_coord = pix_coord;
-    float4 curr_pixel_state = float4(0.f, 0.f, 0.f, 1.f);
+    PixelState curr_pixel_state = PixelState(float4(0.f, 0.f, 0.f, 1.f), float(0.f));
     uint32_t block_size = tile_height * tile_width;
     bool is_inside = (pix_coord.x < W && pix_coord.y < H);
     bool thread_active = is_inside;
@@ -80,14 +83,14 @@ float4 alpha_blend(TensorView<int32_t> sorted_gauss_idx,
             {
                 local_n_contrib++;
                 Splat_2D_AlphaBlend g = collected_splats[j];
-                float4 gauss_rgba = evaluate_splat(g, center_pix_coord, H, W);
+                PixelState gauss_rgba = evaluate_splat(g, center_pix_coord, H, W);
                 
                 // Skip Splats that have a tiny contribution.
-                if (gauss_rgba.a < 1.0f / 255.0f)
+                if (gauss_rgba.color.a < 1.0f / 255.0f)
                     continue;
 
-                float4 new_pixel_state = update_pixel_state(curr_pixel_state, gauss_rgba);
-                if (new_pixel_state.a < 0.0001f) {
+                PixelState new_pixel_state = update_pixel_state(curr_pixel_state, gauss_rgba);
+                if (new_pixel_state.color.a < 0.0001f) {
                     // This Splat never registred so we subtract it before we break.
                     local_n_contrib--;
                     thread_active = false;
@@ -119,7 +122,7 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                      uint32_t tile_width,
                      uint32_t H,
                      uint32_t W,
-                     float4 d_current_pixel_state)
+                     PixelState d_current_pixel_state)
 {
     // Load the final pixel state.
     bool is_inside = (pix_coord.x < W && pix_coord.y < H);
@@ -129,20 +132,24 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
     int splats_left_to_process = tile_idx_end - tile_idx_start;
     uint32_t current_splat_offset = tile_idx_end - tile_idx_start;
 
-    float4 current_pixel_state;
+    PixelState current_pixel_state;
     int32_t n_contrib_fwd;
     if (is_inside) {
-        current_pixel_state = float4(final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
-                                     final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
-                                     final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
-                                     final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3)]);
+        current_pixel_state = PixelState(
+            float4(final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)],
+                   final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1)],
+                   final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2)],
+                   final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3)]),
+            float(final_pixel_state[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 4)]));
         n_contrib_fwd = n_contributors[uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0)];
     }
 
     float2 center_pix_coord = pix_coord;
-
     DifferentialPair<float2> dp_center_pix_coord = diffPair(center_pix_coord);
 
+    // Damping constants (minimal bias, strong stability)
+    const float EPS_SAT = 1e-3f;   // floor on (1 - a) for damping computation
+    const float G_CAP   = 50.0f;   // cap on effective 1/(1-a) gain; tune 25–75 if needed
 
     uint32_t thread_rank = cudaThreadIdx().y * cudaBlockDim().x + cudaThreadIdx().x;
     for (int i = 0; i < rounds; i++)
@@ -166,9 +173,9 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
                 uint32_t g_idx = collected_idx[j];
                 Splat_2D_AlphaBlend g = collected_splats[j];
 
-                float4 gauss_rgba = evaluate_splat(g, center_pix_coord, H, W);
+                PixelState gauss_rgba = evaluate_splat(g, center_pix_coord, H, W);
 
-                if (gauss_rgba.a < 1.0f / 255.0f)
+                if (gauss_rgba.color.a < 1.0f / 255.0f)
                     continue;
 
                 // Undo pixel state
@@ -176,12 +183,29 @@ void bwd_alpha_blend(TensorView<int32_t> sorted_gauss_idx,
 
                 // Back-prop automatically through blending and gaussian evaluation.
                 DifferentialPair<Splat_2D_AlphaBlend> dp_g = diffPair(g);
-                DifferentialPair<float4> dp_gauss_rgba = diffPair(gauss_rgba);
-                DifferentialPair<float4> dp_current_pixel_state = diffPair(current_pixel_state);
+                DifferentialPair<PixelState> dp_gauss_rgba = diffPair(gauss_rgba);
+                DifferentialPair<PixelState> dp_current_pixel_state = diffPair(current_pixel_state);
 
-                bwd_diff(update_pixel_state)(dp_current_pixel_state, dp_gauss_rgba, d_current_pixel_state);
+                // ---- Minimal per-splat saturation damping (no path-length dependence) ----
+                // a in [0,1). When a→1, the adjoint contains factors ~1/(1-a).
+                const float a   = gauss_rgba.color.a;
+                const float sat = max(1.0f - a, EPS_SAT);         // distance to saturation
+                const float scale = min(1.0f, G_CAP * sat);       // cap effective gain
+
+                PixelState d_seed = d_current_pixel_state;
+                d_seed.color.a   *= scale;
+                d_seed.color.rgb *= scale;
+                d_seed.depth     *= scale;
+                bwd_diff(update_pixel_state)(dp_current_pixel_state, dp_gauss_rgba, d_seed);
                 d_current_pixel_state = dp_current_pixel_state.getDifferential();
-                bwd_diff(evaluate_splat)(dp_g, dp_center_pix_coord, H, W, dp_gauss_rgba.d);
+
+                PixelState d_gauss = dp_gauss_rgba.d;  // make a mutable copy
+                d_gauss.color.a   *= scale;
+                d_gauss.color.rgb *= scale;
+                d_gauss.depth     *= scale;
+                bwd_diff(evaluate_splat)(dp_g, dp_center_pix_coord, H, W, d_gauss);
+
+                // Backprop to per-splat parameters
                 bwd_diff(load_splat_alphablend)(g_idx, xyz_vs, inv_cov_vs, opacity, rgb, dp_g.d);
             }
         }
@@ -203,7 +227,8 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
                  int grid_height,
                  int grid_width,
                  int tile_height,
-                 int tile_width)
+                 int tile_width,
+                 TensorView<float> bg_color)
 {
     uint32_t3 globalIdx = cudaBlockIdx() * cudaBlockDim() + cudaThreadIdx();
 
@@ -213,9 +238,22 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
     uint32_t tile_idx_start = uint32_t(tile_ranges[uint2(tile_idx, 0)]);
     uint32_t tile_idx_end = uint32_t(tile_ranges[uint2(tile_idx, 1)]);
 
+
+    if (tile_idx_start >= tile_idx_end) {
+        bool is_inside = (pix_coord.x < output_img.size(1) && pix_coord.y < output_img.size(0));
+        if (is_inside) {
+            output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0), no_diff(bg_color[0]));
+            output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1), no_diff(bg_color[1]));
+            output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2), no_diff(bg_color[2]));
+            output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3), 0.0f);
+            output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 4), 0.0f);
+        }
+        return;
+    }
+
     bool is_inside = (pix_coord.x < output_img.size(1) && pix_coord.y < output_img.size(0));
 
-    float4 pixel_state = alpha_blend(sorted_gauss_idx,
+    PixelState full_pixel_state = alpha_blend(sorted_gauss_idx,
                                      xyz_vs,
                                      inv_cov_vs,
                                      opacity,
@@ -230,10 +268,16 @@ void splat_tiled(TensorView<int32_t> sorted_gauss_idx,
                                      output_img.size(0),
                                      output_img.size(1));
 
+    float4 pixel_state = full_pixel_state.color;
+
     if (is_inside) {
-      output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0), pixel_state.r);
-      output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1), pixel_state.g);
-      output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2), pixel_state.b);
+      output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 0),
+          pixel_state.r + no_diff(bg_color[0]) * pixel_state.a);
+      output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 1),
+          pixel_state.g + no_diff(bg_color[1]) * pixel_state.a);
+      output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 2),
+          pixel_state.b + no_diff(bg_color[2]) * pixel_state.a);
       output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 3), pixel_state.a);
+      output_img.storeOnce(uint3(uint32_t(pix_coord.y), uint32_t(pix_coord.x), 4), full_pixel_state.depth);
     }
 }

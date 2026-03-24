@@ -190,6 +190,11 @@ struct Splat_2D_Vertex : IDifferentiable
     float2x2 cov_vs;
 };
 
+struct PixelState : IDifferentiable {
+    float4 color;
+    float depth;
+};
+
 float splat_radius(float2x2 cov_vs, float det) {
     float mid = 0.5f * (cov_vs[0][0] + cov_vs[1][1]);
     float eigen_val_1 = mid + sqrt(max(0.1f, mid * mid - det));
@@ -219,9 +224,9 @@ Splat_2D_Vertex load_splat_vertex(int32_t g_idx,
 }
 
 [Differentiable]
-Splat_2D_Vertex project_gaussian_to_camera(Gaussian_3D g, Camera cam, uint active_sh) {
+Splat_2D_Vertex project_gaussian_to_camera(Gaussian_3D g, Camera cam, uint active_sh, float z_threshold) {
     float3 xyz_vs = project_point(g.xyz_ws, cam);
-    if (xyz_vs.z <= 0.2) {
+    if (xyz_vs.z <= z_threshold) {
         return {float3(0.0), float3(0.0), float2x2(0.0)};
     }
     float3 rgb = compute_color_from_sh_coeffs(g.sh_coeffs, g.xyz_ws, cam.position, active_sh);
@@ -255,7 +260,7 @@ Splat_2D_AlphaBlend load_splat_alphablend(int32_t g_idx,
 }
 
 [Differentiable]
-float4 evaluate_splat(Splat_2D_AlphaBlend g, 
+PixelState evaluate_splat(Splat_2D_AlphaBlend g, 
                       float2 pix_coord,
                       uint32_t H,
                       uint32_t W)
@@ -270,13 +275,11 @@ float4 evaluate_splat(Splat_2D_AlphaBlend g,
                  pix_coord.y - ndc2pix(g_xyz.y, H) };
     float power = -0.5f * (g_inv_cov_vs[0][0] * d.x * d.x +
                            g_inv_cov_vs[1][1] * d.y * d.y + (g_inv_cov_vs[0][1] + g_inv_cov_vs[1][0]) * d.x * d.y);
-    if (power > 0.f) {
-        return float4(0);
-    }
     float alpha = min(0.99f, g_opacity * exp(power));
     float3 premult_rgb = g_rgb * alpha;
+    float premult_invdepth = (1 / g_xyz.z) * alpha;
     
-    return float4(premult_rgb, alpha);
+    return PixelState(float4(premult_rgb, alpha), premult_invdepth);
 }
 
 [Differentiable]

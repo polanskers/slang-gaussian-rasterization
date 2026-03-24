@@ -1,2 +1,3 @@
 global-exclude *~ *.py[cod] *.so *.lock
 include slang_gaussian_rasterization/internal/slang/*.slang
+include slang_gaussian_rasterization/internal/sort_by_keys/sort_by_keys.cu

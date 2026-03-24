@@ -24,8 +24,13 @@ def set_grad(var):
 
 def render_alpha_blend_tiles_slang_raw(xyz_ws, rotations, scales, opacity, 
                                        sh_coeffs, active_sh,
-                                       world_view_transform, proj_mat, cam_pos,
-                                       fovy, fovx, height, width, tile_size=16):
+                                       world_view_transform, proj_mat,cam_pos,
+                                       fovy, fovx, height, width,
+                                       bg_color=torch.zeros(3),
+                                       tile_size=16,
+                                       render_method='default',
+                                       z_threshold=0.2
+                                       ):
     
     render_grid = RenderGrid(height,
                              width,
@@ -41,7 +46,8 @@ def render_alpha_blend_tiles_slang_raw(xyz_ws, rotations, scales, opacity,
                                                                                            cam_pos,
                                                                                            fovy,
                                                                                            fovx,
-                                                                                           render_grid)
+                                                                                           render_grid,
+                                                                                           z_threshold)
    
     # retain_grad fails if called with torch.no_grad() under evaluation
     try:
@@ -56,10 +62,14 @@ def render_alpha_blend_tiles_slang_raw(xyz_ws, rotations, scales, opacity,
         inv_cov_vs,
         opacity,
         rgb,
-        render_grid)
+        render_grid,
+        render_method,
+        bg_color,
+        )
     
     render_pkg = {
         'render': image_rgb.permute(2,0,1)[:3, ...],
+        'extra': image_rgb.permute(2,0,1)[3:, ...],
         'viewspace_points': xyz_vs,
         'visibility_filter': radii > 0,
         'radii': radii,
@@ -72,9 +82,9 @@ class AlphaBlendTiledRender(torch.autograd.Function):
     @staticmethod
     def forward(ctx, 
                 sorted_gauss_idx, tile_ranges,
-                xyz_vs, inv_cov_vs, opacity, rgb, render_grid, device="cuda"):
+                xyz_vs, inv_cov_vs, opacity, rgb, render_grid, render_method, bg_color, device="cuda"):
         output_img = torch.zeros((render_grid.image_height, 
-                                  render_grid.image_width, 4), 
+                                  render_grid.image_width, 5), 
                                  device=device)
         n_contributors = torch.zeros((render_grid.image_height, 
                                       render_grid.image_width, 1),
@@ -90,15 +100,15 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         splat_kernel_with_args = alpha_blend_tile_shader.splat_tiled(
             sorted_gauss_idx=sorted_gauss_idx,
             tile_ranges=tile_ranges,
-            xyz_vs=xyz_vs, inv_cov_vs=inv_cov_vs, 
+            xyz_vs=xyz_vs[:, :3], inv_cov_vs=inv_cov_vs, 
             opacity=opacity, rgb=rgb, 
             output_img=output_img,
             n_contributors=n_contributors,
             grid_height=render_grid.grid_height,
             grid_width=render_grid.grid_width,
             tile_height=render_grid.tile_height,
-            tile_width=render_grid.tile_width
-        )
+            tile_width=render_grid.tile_width,
+            bg_color=bg_color)
         splat_kernel_with_args.launchRaw(
             blockSize=(render_grid.tile_width, 
                        render_grid.tile_height, 1),
@@ -110,6 +120,8 @@ class AlphaBlendTiledRender(torch.autograd.Function):
                               xyz_vs, inv_cov_vs, opacity, rgb, 
                               output_img, n_contributors)
         ctx.render_grid = render_grid
+        ctx.render_method = render_method
+        ctx.bg_color = bg_color
 
         return output_img
 
@@ -119,6 +131,8 @@ class AlphaBlendTiledRender(torch.autograd.Function):
          xyz_vs, inv_cov_vs, opacity, rgb, 
          output_img, n_contributors) = ctx.saved_tensors
         render_grid = ctx.render_grid
+        render_method = ctx.render_method
+        bg_color = ctx.bg_color
 
         xyz_vs_grad = torch.zeros_like(xyz_vs)
         inv_cov_vs_grad = torch.zeros_like(inv_cov_vs)
@@ -137,7 +151,7 @@ class AlphaBlendTiledRender(torch.autograd.Function):
         kernel_with_args = alpha_blend_tile_shader.splat_tiled.bwd(
             sorted_gauss_idx=sorted_gauss_idx,
             tile_ranges=tile_ranges,
-            xyz_vs=(xyz_vs, xyz_vs_grad),
+            xyz_vs=(xyz_vs[...,:3], xyz_vs_grad[...,:3]),
             inv_cov_vs=(inv_cov_vs, inv_cov_vs_grad),
             opacity=(opacity, opacity_grad),
             rgb=(rgb, rgb_grad),
@@ -146,7 +160,8 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             grid_height=render_grid.grid_height,
             grid_width=render_grid.grid_width,
             tile_height=render_grid.tile_height,
-            tile_width=render_grid.tile_width)
+            tile_width=render_grid.tile_width,
+            bg_color=bg_color)
         
         kernel_with_args.launchRaw(
             blockSize=(render_grid.tile_width, 
@@ -154,5 +169,9 @@ class AlphaBlendTiledRender(torch.autograd.Function):
             gridSize=(render_grid.grid_width, 
                       render_grid.grid_height, 1)
         )
+
+        if render_method == "reinforce":
+            xyz_vs_grad = torch.zeros_like(xyz_vs_grad)
+            xyz_vs_grad[:, 3:4] = opacity_grad.clone().detach() * opacity.clone().detach()
         
-        return None, None, xyz_vs_grad, inv_cov_vs_grad, opacity_grad, rgb_grad, None, None
+        return None, None, xyz_vs_grad, inv_cov_vs_grad, opacity_grad, rgb_grad, None, None, None
